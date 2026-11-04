@@ -65,20 +65,14 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
   String? _locationError;
 
   double? _currentDistance;
-
-  static const LatLng _fallbackLocation = LatLng(6.4297, 100.2698);
+  String _movementTrend = 'Stationary';
 
   // ── Computed properties ──────────────────────────────────────
 
-  LatLng get _targetLocation =>
-      _geofence == null
-          ? _fallbackLocation
-          : LatLng(_geofence!.latitude, _geofence!.longitude);
+  LatLng get _targetLocation => LatLng(_targetLatitude, _targetLongitude);
 
-  double get _targetLatitude =>
-      _geofence?.latitude ?? _fallbackLocation.latitude;
-  double get _targetLongitude =>
-      _geofence?.longitude ?? _fallbackLocation.longitude;
+  double get _targetLatitude => _geofence?.latitude ?? 0.0;
+  double get _targetLongitude => _geofence?.longitude ?? 0.0;
   double get _geofenceRadiusMeters => _geofence?.radiusMeters ?? 0.0;
 
   // ── Init ─────────────────────────────────────────────────────
@@ -113,23 +107,20 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
     try {
       final geofences = await GeofenceService().fetchGeofences();
-      if (geofences.isEmpty) throw Exception('No geofence records found.');
+      if (geofences.isEmpty) throw Exception('No geofence records found in Oracle database.');
 
       if (!mounted) return;
       setState(() {
         _geofence = geofences.first;
         _isLoadingGeofence = false;
+        _geofenceError = null;
       });
-
-      await _mapController?.animateCamera(
-        CameraUpdate.newLatLngZoom(_targetLocation, 18),
-      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _geofence = null;
         _isLoadingGeofence = false;
-        _geofenceError = e.toString();
+        _geofenceError = 'Database/backend offline: $e';
       });
     }
   }
@@ -186,21 +177,24 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
   void _startStream() {
     _positionSubscription?.cancel();
-    _positionSubscription = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 1,
-      ),
-    ).listen(
-      (p) { if (mounted) _updateLocation(p); },
-      onError: (e) {
-        if (!mounted) return;
-        setState(() {
-          _locationError = 'GPS error: $e';
-          _isLoadingLocation = false;
-        });
-      },
-    );
+    _positionSubscription =
+        Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            distanceFilter: 1,
+          ),
+        ).listen(
+          (p) {
+            if (mounted) _updateLocation(p);
+          },
+          onError: (e) {
+            if (!mounted) return;
+            setState(() {
+              _locationError = 'GPS error: $e';
+              _isLoadingLocation = false;
+            });
+          },
+        );
   }
 
   void _updateLocation(Position position) {
@@ -213,9 +207,22 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
       _targetLongitude,
     );
 
+    String trend = _movementTrend;
+    if (_currentDistance != null) {
+      final diff = distance - _currentDistance!;
+      if (diff < -0.3) {
+        trend = 'Moving closer ↓';
+      } else if (diff > 0.3) {
+        trend = 'Moving away ↑';
+      } else if (position.speed < 0.3) {
+        trend = 'Stationary';
+      }
+    }
+
     setState(() {
       _currentLocation = position;
       _currentDistance = distance;
+      _movementTrend = trend;
       _isInGeofence = distance <= _geofenceRadiusMeters;
       _isLoadingLocation = false;
       _locationError = null;
@@ -231,14 +238,14 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     if (_geofence != null) await _initializeLocation();
   }
 
-  Future<void> _goToMyLocation() async {
-    if (_currentLocation == null) { await _retry(); return; }
-    await _mapController?.animateCamera(
-      CameraUpdate.newLatLngZoom(
-        LatLng(_currentLocation!.latitude, _currentLocation!.longitude),
-        18,
-      ),
-    );
+  Future<void> _refreshGPS() async {
+    await _initializeLocation();
+    if (_currentLocation != null) {
+      _showSnack(
+        'Location updated: ${_currentLocation!.latitude.toStringAsFixed(6)}, ${_currentLocation!.longitude.toStringAsFixed(6)}',
+        Colors.blue,
+      );
+    }
   }
 
   // ── Check-in ─────────────────────────────────────────────────
@@ -254,7 +261,10 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     );
 
     if (distance > _geofenceRadiusMeters) {
-      setState(() { _currentDistance = distance; _isInGeofence = false; });
+      setState(() {
+        _currentDistance = distance;
+        _isInGeofence = false;
+      });
       _showSnack(
         'You are ${distance.toStringAsFixed(1)} m away. Move closer.',
         Colors.red,
@@ -294,20 +304,29 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     final markers = <Marker>{};
 
     if (_geofence != null) {
-      markers.add(Marker(
-        markerId: const MarkerId('property'),
-        position: _targetLocation,
-        infoWindow: InfoWindow(title: _geofence!.locationName),
-      ));
+      markers.add(
+        Marker(
+          markerId: const MarkerId('property'),
+          position: _targetLocation,
+          infoWindow: InfoWindow(title: _geofence!.locationName),
+        ),
+      );
     }
 
     if (_currentLocation != null) {
-      markers.add(Marker(
-        markerId: const MarkerId('me'),
-        position: LatLng(_currentLocation!.latitude, _currentLocation!.longitude),
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-        infoWindow: const InfoWindow(title: 'You are here'),
-      ));
+      markers.add(
+        Marker(
+          markerId: const MarkerId('me'),
+          position: LatLng(
+            _currentLocation!.latitude,
+            _currentLocation!.longitude,
+          ),
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueAzure,
+          ),
+          infoWindow: const InfoWindow(title: 'You are here'),
+        ),
+      );
     }
 
     return markers;
@@ -335,10 +354,15 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     if (_isLoadingLocation) return 'Getting your location...';
     if (_locationError != null) return _locationError!;
     if (_currentDistance == null) return 'Waiting for GPS...';
+
+    final movementInfo = _movementTrend != 'Stationary'
+        ? ' • $_movementTrend'
+        : '';
+
     if (_isInGeofence) {
-      return '✓  Inside — ${_currentDistance!.toStringAsFixed(1)} m from ${_geofence!.locationName}';
+      return '✓ Inside — ${_currentDistance!.toStringAsFixed(1)} m from ${_geofence!.locationName}$movementInfo';
     }
-    return '${_currentDistance!.toStringAsFixed(1)} m away (radius ${_geofenceRadiusMeters.toStringAsFixed(0)} m)';
+    return '${_currentDistance!.toStringAsFixed(1)} m away (radius ${_geofenceRadiusMeters.toStringAsFixed(0)} m)$movementInfo';
   }
 
   Color get _statusColor {
@@ -355,6 +379,54 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
       !_isLoadingLocation &&
       !_isLoadingGeofence &&
       !_isCheckingIn;
+
+  Widget _buildCheckpointImage() {
+    return Container(
+      color: Colors.white,
+      child: Image.asset(
+        'assets/images/dmdc.jpg',
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          return Image.asset(
+            'assets/images/dmdc.png',
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) {
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  CustomPaint(painter: _WireframeCrossPainter()),
+                  Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'image location',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey[800],
+                            fontWeight: FontWeight.w400,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Checkpoint place',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black87,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
 
   // ── Build ─────────────────────────────────────────────────────
 
@@ -381,12 +453,12 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.my_location, color: Colors.black54),
-            tooltip: 'My location',
-            onPressed: _goToMyLocation,
+            tooltip: 'Refresh GPS',
+            onPressed: _refreshGPS,
           ),
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.black54),
-            tooltip: 'Refresh',
+            tooltip: 'Reload',
             onPressed: _initializeApp,
           ),
         ],
@@ -394,32 +466,11 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
       body: Column(
         children: [
-          // ── MAP ───────────────────────────────────────────────
+          // ── CHECKPOINT IMAGE ──────────────────────────────────
           SizedBox(
-            height: MediaQuery.of(context).size.height * 0.40,
-            child: GoogleMap(
-              initialCameraPosition: CameraPosition(
-                target: _targetLocation,
-                zoom: 18,
-              ),
-              onMapCreated: (controller) {
-                _mapController = controller;
-                if (_geofence != null) {
-                  controller.animateCamera(
-                    CameraUpdate.newLatLngZoom(_targetLocation, 18),
-                  );
-                }
-              },
-              markers: _markers,
-              circles: _circles,
-              myLocationEnabled:
-                  _locationPermissionGranted && _currentLocation != null,
-              myLocationButtonEnabled: false,
-              zoomControlsEnabled: true,
-              mapToolbarEnabled: false,
-              compassEnabled: false,
-              mapType: MapType.normal,
-            ),
+            height: MediaQuery.of(context).size.height * 0.35,
+            width: double.infinity,
+            child: _buildCheckpointImage(),
           ),
 
           // ── LOCATION BAR ──────────────────────────────────────
@@ -443,10 +494,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
                       const SizedBox(height: 2),
                       Text(
                         'Location',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey[700],
-                        ),
+                        style: TextStyle(fontSize: 11, color: Colors.grey[700]),
                       ),
                     ],
                   ),
@@ -473,10 +521,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
                 Expanded(
                   child: Text(
                     _statusText,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[700],
-                    ),
+                    style: TextStyle(fontSize: 12, color: Colors.grey[700]),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -493,6 +538,193 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
             ),
           ),
 
+          // ── LIVE MOVEMENT / DISTANCE CARD ─────────────────────
+          if (_currentDistance != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: _isInGeofence
+                        ? Colors.green.shade400
+                        : Colors.orange.shade400,
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.04),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'DISTANCE TO CHECKPOINT',
+                              style: TextStyle(
+                                fontSize: 10,
+                                letterSpacing: 0.8,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                Text(
+                                  '${_currentDistance!.toStringAsFixed(1)} m',
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                    color: _isInGeofence
+                                        ? Colors.green.shade700
+                                        : Colors.black87,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  '/ ${_geofenceRadiusMeters.toStringAsFixed(0)} m radius',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey[600],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _isInGeofence
+                                  ? '✓ ${(_geofenceRadiusMeters - _currentDistance!).toStringAsFixed(1)} m inside radius limit'
+                                  : '⚠ ${(_currentDistance! - _geofenceRadiusMeters).toStringAsFixed(1)} m outside 50m radius',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: _isInGeofence
+                                    ? Colors.green.shade800
+                                    : Colors.red.shade700,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: _movementTrend.contains('closer')
+                                ? Colors.green.shade50
+                                : _movementTrend.contains('away')
+                                ? Colors.orange.shade50
+                                : Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: _movementTrend.contains('closer')
+                                  ? Colors.green.shade400
+                                  : _movementTrend.contains('away')
+                                  ? Colors.orange.shade400
+                                  : Colors.grey.shade300,
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                _movementTrend.contains('closer')
+                                    ? Icons.arrow_downward_rounded
+                                    : _movementTrend.contains('away')
+                                    ? Icons.arrow_upward_rounded
+                                    : Icons.place_outlined,
+                                size: 14,
+                                color: _movementTrend.contains('closer')
+                                    ? Colors.green.shade700
+                                    : _movementTrend.contains('away')
+                                    ? Colors.orange.shade800
+                                    : Colors.grey.shade700,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                _movementTrend,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  color: _movementTrend.contains('closer')
+                                      ? Colors.green.shade700
+                                      : _movementTrend.contains('away')
+                                      ? Colors.orange.shade800
+                                      : Colors.grey.shade700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Divider(height: 1, thickness: 1),
+                    ),
+                    // ── WHERE WE ARE (LIVE GPS) ──
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.person_pin_circle_outlined,
+                          size: 15,
+                          color: Colors.blue,
+                        ),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            'Your Location: ${_currentLocation != null ? '${_currentLocation!.latitude.toStringAsFixed(6)}, ${_currentLocation!.longitude.toStringAsFixed(6)}' : 'Locating...'}',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.black87,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    // ── CHECKPOINT TARGET ──
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.flag_outlined,
+                          size: 15,
+                          color: Colors.red,
+                        ),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            'Checkpoint: ${_geofence != null ? '${_targetLatitude.toStringAsFixed(6)}, ${_targetLongitude.toStringAsFixed(6)} (${_geofence!.locationName})' : 'Loading from database...'}',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[700],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
           // ── SPACER ────────────────────────────────────────────
           const Spacer(),
 
@@ -506,13 +738,14 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
                 onPressed: _buttonEnabled ? _checkIn : null,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _isInGeofence
-                      ? const Color(0xFF4CAF50)
-                      : Colors.grey[400],
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor: Colors.grey[300],
+                      ? const Color(0xFF4A855A)
+                      : const Color(0xFF7E9785),
+                  foregroundColor: Colors.black87,
+                  disabledBackgroundColor: Colors.grey[400],
                   elevation: 0,
+                  side: const BorderSide(color: Color(0xFF0091EA), width: 2.5),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
                 child: _isCheckingIn
@@ -549,4 +782,37 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     _mapController?.dispose();
     super.dispose();
   }
+}
+
+// ============================================================
+// WIREFRAME PLACEHOLDER PAINTER
+// ============================================================
+
+class _WireframeCrossPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final borderPaint = Paint()
+      ..color = Colors.black87
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+
+    final crossPaint = Paint()
+      ..color = Colors.black54
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+
+    // Outer border
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), borderPaint);
+
+    // Diagonal lines across (X)
+    canvas.drawLine(
+      const Offset(0, 0),
+      Offset(size.width, size.height),
+      crossPaint,
+    );
+    canvas.drawLine(Offset(0, size.height), Offset(size.width, 0), crossPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
