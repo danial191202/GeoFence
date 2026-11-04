@@ -29,8 +29,21 @@ class Geofence {
 }
 
 class GeofenceService {
-  // Android Emulator -> Your computer's localhost
-  static const String apiUrl = 'http://10.0.2.2:8082/api/geofences';
+  // ── URL Configuration ───────────────────────────────────────────────────────
+  // Use the emulator alias when running in the Android Emulator.
+  // Use your PC's LAN IP when running on a real device connected to the same
+  // Wi-Fi network as the Spring Boot backend.
+  //
+  // Android Emulator  → http://10.0.2.2:8082/api/geofences
+  // Real device (LAN) → http://10.14.3.137:8082/api/geofences
+  //
+  // Set [_useEmulator] to true for emulator, false for a real device.
+  static const bool _useEmulator = false;
+
+  static const String _emulatorUrl = 'http://10.0.2.2:8082/api/geofences';
+  static const String _deviceUrl   = 'http://10.14.3.137:8082/api/geofences';
+
+  static String get apiUrl => _useEmulator ? _emulatorUrl : _deviceUrl;
 
   Future<List<Geofence>> fetchGeofences() async {
     try {
