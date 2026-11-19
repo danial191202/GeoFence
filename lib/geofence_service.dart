@@ -38,10 +38,10 @@ class GeofenceService {
   // Real device (LAN) → http://10.14.3.137:8082/api/geofences
   //
   // Set [_useEmulator] to true for emulator, false for a real device.
-  static const bool _useEmulator = true; // ← change to true for emulator
+  static const bool _useEmulator = false; // ← change to true for emulator
 
   static const String _emulatorUrl = 'http://10.0.2.2:8082/api/geofences';
-  static const String _deviceUrl = 'http://10.14.3.137:8082/api/geofences';
+  static const String _deviceUrl = 'http://10.14.3.82:8082/api/geofences';
 
   static String get apiUrl => _useEmulator ? _emulatorUrl : _deviceUrl;
 

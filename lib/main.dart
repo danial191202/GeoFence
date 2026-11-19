@@ -159,7 +159,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
       if (!mounted) return;
       _updateLocation(position);
-      _startStream();
+      /*_startStream();*/
     } on TimeoutException {
       if (!mounted) return;
       setState(() {
@@ -175,7 +175,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     }
   }
 
-  void _startStream() {
+  /*void _startStream() {
     _positionSubscription?.cancel();
     _positionSubscription =
         Geolocator.getPositionStream(
@@ -195,7 +195,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
             });
           },
         );
-  }
+  }*/
 
   void _updateLocation(Position position) {
     if (!mounted || _geofence == null) return;
@@ -238,12 +238,38 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     if (_geofence != null) await _initializeLocation();
   }
 
-  Future<void> _refreshGPS() async {
+  /*Future<void> _refreshGPS() async {
     await _initializeLocation();
     if (_currentLocation != null) {
       _showSnack(
         'Location updated: ${_currentLocation!.latitude.toStringAsFixed(6)}, ${_currentLocation!.longitude.toStringAsFixed(6)}',
         Colors.blue,
+      );
+    }
+  }*/
+    Future<void> _refreshGPS() async {
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 20),
+      );
+
+      _updateLocation(position);
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Location updated successfully'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to update location: $e'),
+        ),
       );
     }
   }
