@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'geofence_service.dart';
 
@@ -48,16 +47,12 @@ class GeofenceCheckinScreen extends StatefulWidget {
 }
 
 class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
-  GoogleMapController? _mapController;
-
-  StreamSubscription<Position>? _positionSubscription;
   Position? _currentLocation;
 
   Geofence? _geofence;
 
   bool _isLoadingGeofence = true;
   bool _isLoadingLocation = true;
-  bool _locationPermissionGranted = false;
   bool _isInGeofence = false;
   bool _isCheckingIn = false;
 
@@ -68,8 +63,6 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
   String _movementTrend = 'Stationary';
 
   // ── Computed properties ──────────────────────────────────────
-
-  LatLng get _targetLocation => LatLng(_targetLatitude, _targetLongitude);
 
   double get _targetLatitude => _geofence?.latitude ?? 0.0;
   double get _targetLongitude => _geofence?.longitude ?? 0.0;
@@ -107,7 +100,9 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
     try {
       final geofences = await GeofenceService().fetchGeofences();
-      if (geofences.isEmpty) throw Exception('No geofence records found in Oracle database.');
+      if (geofences.isEmpty) {
+        throw Exception('No geofence records found in Oracle database.');
+      }
 
       if (!mounted) return;
       setState(() {
@@ -149,9 +144,6 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
         throw Exception('Location permission permanently denied.');
       }
 
-      if (!mounted) return;
-      setState(() => _locationPermissionGranted = true);
-
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
         timeLimit: const Duration(seconds: 20),
@@ -159,7 +151,6 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
       if (!mounted) return;
       _updateLocation(position);
-      /*_startStream();*/
     } on TimeoutException {
       if (!mounted) return;
       setState(() {
@@ -174,28 +165,6 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
       });
     }
   }
-
-  /*void _startStream() {
-    _positionSubscription?.cancel();
-    _positionSubscription =
-        Geolocator.getPositionStream(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            distanceFilter: 1,
-          ),
-        ).listen(
-          (p) {
-            if (mounted) _updateLocation(p);
-          },
-          onError: (e) {
-            if (!mounted) return;
-            setState(() {
-              _locationError = 'GPS error: $e';
-              _isLoadingLocation = false;
-            });
-          },
-        );
-  }*/
 
   void _updateLocation(Position position) {
     if (!mounted || _geofence == null) return;
@@ -227,10 +196,6 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
       _isLoadingLocation = false;
       _locationError = null;
     });
-
-    _mapController?.animateCamera(
-      CameraUpdate.newLatLng(LatLng(position.latitude, position.longitude)),
-    );
   }
 
   Future<void> _retry() async {
@@ -238,16 +203,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     if (_geofence != null) await _initializeLocation();
   }
 
-  /*Future<void> _refreshGPS() async {
-    await _initializeLocation();
-    if (_currentLocation != null) {
-      _showSnack(
-        'Location updated: ${_currentLocation!.latitude.toStringAsFixed(6)}, ${_currentLocation!.longitude.toStringAsFixed(6)}',
-        Colors.blue,
-      );
-    }
-  }*/
-    Future<void> _refreshGPS() async {
+  Future<void> _refreshGPS() async {
     try {
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
@@ -259,18 +215,14 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Location updated successfully'),
-        ),
+        const SnackBar(content: Text('Location updated successfully')),
       );
     } catch (e) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Unable to update location: $e'),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Unable to update location: $e')));
     }
   }
 
@@ -324,54 +276,6 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     );
   }
 
-  // ── Map data ─────────────────────────────────────────────────
-
-  Set<Marker> get _markers {
-    final markers = <Marker>{};
-
-    if (_geofence != null) {
-      markers.add(
-        Marker(
-          markerId: const MarkerId('property'),
-          position: _targetLocation,
-          infoWindow: InfoWindow(title: _geofence!.locationName),
-        ),
-      );
-    }
-
-    if (_currentLocation != null) {
-      markers.add(
-        Marker(
-          markerId: const MarkerId('me'),
-          position: LatLng(
-            _currentLocation!.latitude,
-            _currentLocation!.longitude,
-          ),
-          icon: BitmapDescriptor.defaultMarkerWithHue(
-            BitmapDescriptor.hueAzure,
-          ),
-          infoWindow: const InfoWindow(title: 'You are here'),
-        ),
-      );
-    }
-
-    return markers;
-  }
-
-  Set<Circle> get _circles {
-    if (_geofence == null) return {};
-    return {
-      Circle(
-        circleId: const CircleId('fence'),
-        center: _targetLocation,
-        radius: _geofenceRadiusMeters,
-        fillColor: Colors.blue.withValues(alpha: 0.15),
-        strokeColor: Colors.blue,
-        strokeWidth: 2,
-      ),
-    };
-  }
-
   // ── Status text helpers ───────────────────────────────────────
 
   String get _statusText {
@@ -413,41 +317,35 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
         'assets/images/dmdc.jpg',
         fit: BoxFit.cover,
         errorBuilder: (context, error, stackTrace) {
-          return Image.asset(
-            'assets/images/dmdc.png',
-            fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) {
-              return Stack(
-                fit: StackFit.expand,
-                children: [
-                  CustomPaint(painter: _WireframeCrossPainter()),
-                  Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'image location',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: Colors.grey[800],
-                            fontWeight: FontWeight.w400,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        const Text(
-                          'Checkpoint place',
-                          style: TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.black87,
-                          ),
-                        ),
-                      ],
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              CustomPaint(painter: _WireframeCrossPainter()),
+              Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'image location',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey[800],
+                        fontWeight: FontWeight.w400,
+                      ),
                     ),
-                  ),
-                ],
-              );
-            },
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Checkpoint place',
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           );
         },
       ),
@@ -584,7 +482,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.04),
+                      color: Colors.black.withValues(alpha: 0.04),
                       blurRadius: 8,
                       offset: const Offset(0, 2),
                     ),
@@ -635,7 +533,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
                             Text(
                               _isInGeofence
                                   ? '✓ ${(_geofenceRadiusMeters - _currentDistance!).toStringAsFixed(1)} m inside radius limit'
-                                  : '⚠ ${(_currentDistance! - _geofenceRadiusMeters).toStringAsFixed(1)} m outside 50m radius',
+                                  : '⚠ ${(_currentDistance! - _geofenceRadiusMeters).toStringAsFixed(1)} m outside ${_geofenceRadiusMeters.toStringAsFixed(0)}m radius',
                               style: TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w600,
@@ -804,8 +702,6 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
   @override
   void dispose() {
-    _positionSubscription?.cancel();
-    _mapController?.dispose();
     super.dispose();
   }
 }
