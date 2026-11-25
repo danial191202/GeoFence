@@ -48,10 +48,11 @@ class GeofenceCheckinScreen extends StatefulWidget {
 
 class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
   Position? _currentLocation;
-
   Geofence? _geofence;
+  ActiveSchedule? _activeSchedule;
 
   bool _isLoadingGeofence = true;
+  bool _isLoadingSchedule = true;
   bool _isLoadingLocation = true;
   bool _isInGeofence = false;
   bool _isCheckingIn = false;
@@ -77,7 +78,11 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
   }
 
   Future<void> _initializeApp() async {
-    await _fetchGeofence();
+    await Future.wait([
+      _fetchGeofence(),
+      _fetchSchedule(),
+    ]);
+
     if (!mounted) return;
     if (_geofence == null) {
       setState(() {
@@ -106,7 +111,15 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
       if (!mounted) return;
       setState(() {
-        _geofence = geofences.first;
+        // If an active schedule specifies a geofenceId, prioritize matching it
+        if (_activeSchedule?.geofenceId != null) {
+          final matched = geofences
+              .where((g) => g.geofenceId == _activeSchedule!.geofenceId)
+              .toList();
+          _geofence = matched.isNotEmpty ? matched.first : geofences.first;
+        } else {
+          _geofence = geofences.first;
+        }
         _isLoadingGeofence = false;
         _geofenceError = null;
       });
@@ -118,6 +131,84 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
         _geofenceError = 'Database/backend offline: $e';
       });
     }
+  }
+
+  // ── Fetch active schedule & guard info ───────────────────────
+
+  Future<void> _fetchSchedule() async {
+    if (!mounted) return;
+    setState(() {
+      _isLoadingSchedule = true;
+    });
+
+    try {
+      final schedule = await GeofenceService().fetchActiveSchedule(guardId: 1);
+      if (!mounted) return;
+      setState(() {
+        _activeSchedule = schedule;
+        _isLoadingSchedule = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingSchedule = false;
+      });
+    }
+  }
+
+  // ── Formatted schedule helpers ───────────────────────────────
+
+  String get _formattedStartTime {
+    final raw = _activeSchedule?.scheduleStart;
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final dt = DateTime.tryParse(raw);
+        if (dt != null) {
+          final h = dt.hour.toString().padLeft(2, '0');
+          final m = dt.minute.toString().padLeft(2, '0');
+          return 'Times=$h:$m';
+        }
+        if (raw.contains(':')) {
+          final parts = raw.split(':');
+          if (parts.length >= 2) {
+            final hPart = parts[0].contains('T') ? parts[0].split('T').last : parts[0];
+            return 'Times=${hPart.padLeft(2, '0')}:${parts[1].padLeft(2, '0')}';
+          }
+        }
+      } catch (_) {}
+    }
+    return 'Times=13:00';
+  }
+
+  String get _formattedDayOfWeek {
+    final dateStr = _activeSchedule?.patrolDate ?? _activeSchedule?.scheduleStart;
+    if (dateStr != null && dateStr.isNotEmpty) {
+      try {
+        final dt = DateTime.tryParse(dateStr);
+        if (dt != null) {
+          const days = [
+            'monday',
+            'tuesday',
+            'wednesday',
+            'thursday',
+            'friday',
+            'saturday',
+            'sunday',
+          ];
+          return days[dt.weekday - 1];
+        }
+      } catch (_) {}
+    }
+    const days = [
+      'monday',
+      'tuesday',
+      'wednesday',
+      'thursday',
+      'friday',
+      'saturday',
+      'sunday',
+    ];
+    return days[DateTime.now().weekday - 1];
   }
 
   // ── Location ─────────────────────────────────────────────────
@@ -200,6 +291,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
   Future<void> _retry() async {
     if (_geofence == null) await _fetchGeofence();
+    if (_activeSchedule == null) await _fetchSchedule();
     if (_geofence != null) await _initializeLocation();
   }
 
@@ -252,9 +344,25 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
     setState(() => _isCheckingIn = true);
     try {
-      await Future.delayed(const Duration(milliseconds: 400));
+      final guardId = _activeSchedule?.guardId ?? 1;
+      final geofenceId = _geofence!.geofenceId;
+      final scheduleId = _activeSchedule?.scheduleId;
+
+      await GeofenceService().saveCheckin(
+        guardId: guardId,
+        geofenceId: geofenceId,
+        scheduleId: scheduleId,
+        userLatitude: _currentLocation!.latitude,
+        userLongitude: _currentLocation!.longitude,
+        distanceMeters: distance,
+        verificationStatus: 'VERIFIED',
+      );
+
       if (!mounted) return;
-      _showSnack('Check-in successful!', Colors.green);
+      _showSnack('Check-in successful! Saved to Oracle.', Colors.green);
+
+      // Refresh schedule to reflect completed state
+      await _fetchSchedule();
     } catch (e) {
       if (!mounted) return;
       _showSnack('Check-in failed: $e', Colors.red);
@@ -290,7 +398,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
         : '';
 
     if (_isInGeofence) {
-      return '✓ Inside — ${_currentDistance!.toStringAsFixed(1)} m from ${_geofence!.locationName}$movementInfo';
+      return '✓ Inside — ${_currentDistance!.toStringAsFixed(1)} m from ${_geofence!.zoneName}$movementInfo';
     }
     return '${_currentDistance!.toStringAsFixed(1)} m away (radius ${_geofenceRadiusMeters.toStringAsFixed(0)} m)$movementInfo';
   }
@@ -352,6 +460,103 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     );
   }
 
+  // ── Security Guard Info Card ─────────────────────────────────
+
+  Widget _buildSecurityGuardCard() {
+    final dutyStatus = _activeSchedule?.dutyStatus ?? 'ON_DUTY';
+    final isOnDuty = dutyStatus.toUpperCase() == 'ON_DUTY';
+    final fullName = _isLoadingSchedule
+        ? 'Loading...'
+        : (_activeSchedule?.fullName ?? 'Malik');
+    final guardNumber = _activeSchedule?.guardNumber ?? '4123';
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 0, 20, 14),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: const Color(0xFF0091EA), // 1.5px blue border
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // Left: Status indicator circle (12x12, #4C8055 when ON_DUTY)
+          Container(
+            width: 12,
+            height: 12,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: isOnDuty ? const Color(0xFF4C8055) : Colors.grey[400],
+            ),
+          ),
+          const SizedBox(width: 12),
+          // Guard Full Name & Guard Number Column
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  fullName,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  guardNumber,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey[600],
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          // Right: Times=HH:mm & Day of Week Column
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _formattedStartTime,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black87,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                _formattedDayOfWeek,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey[600],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Build ─────────────────────────────────────────────────────
 
   @override
@@ -388,314 +593,320 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
         ],
       ),
 
-      body: Column(
-        children: [
-          // ── CHECKPOINT IMAGE ──────────────────────────────────
-          SizedBox(
-            height: MediaQuery.of(context).size.height * 0.35,
-            width: double.infinity,
-            child: _buildCheckpointImage(),
-          ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ── CHECKPOINT IMAGE ──────────────────────────────────
+              SizedBox(
+                height: 200,
+                width: double.infinity,
+                child: _buildCheckpointImage(),
+              ),
 
-          // ── LOCATION BAR ──────────────────────────────────────
-          Container(
-            color: Colors.grey[400],
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _geofence?.locationName ?? 'Loading...',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                          color: Colors.black87,
-                        ),
+              // ── LOCATION BAR ──────────────────────────────────────
+              Container(
+                color: Colors.grey[400],
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _geofence?.zoneName ?? 'Loading...',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                              color: Colors.black87,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Location',
+                            style: TextStyle(fontSize: 11, color: Colors.grey[700]),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Location',
-                        style: TextStyle(fontSize: 11, color: Colors.grey[700]),
-                      ),
-                    ],
-                  ),
-                ),
-                const Icon(Icons.arrow_drop_down, color: Colors.black54),
-              ],
-            ),
-          ),
-
-          // ── STATUS ────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
-            child: Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _statusColor,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _statusText,
-                    style: TextStyle(fontSize: 12, color: Colors.grey[700]),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (_geofenceError != null || _locationError != null)
-                  GestureDetector(
-                    onTap: _retry,
-                    child: const Padding(
-                      padding: EdgeInsets.only(left: 8),
-                      child: Icon(Icons.refresh, size: 16, color: Colors.grey),
                     ),
-                  ),
-              ],
-            ),
-          ),
-
-          // ── LIVE MOVEMENT / DISTANCE CARD ─────────────────────
-          if (_currentDistance != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: _isInGeofence
-                        ? Colors.green.shade400
-                        : Colors.orange.shade400,
-                    width: 1.5,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.04),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
+                    const Icon(Icons.arrow_drop_down, color: Colors.black54),
                   ],
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              ),
+
+              // ── STATUS ────────────────────────────────────────────
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                child: Row(
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _statusColor,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _statusText,
+                        style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (_geofenceError != null || _locationError != null)
+                      GestureDetector(
+                        onTap: _retry,
+                        child: const Padding(
+                          padding: EdgeInsets.only(left: 8),
+                          child: Icon(Icons.refresh, size: 16, color: Colors.grey),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+
+              // ── LIVE MOVEMENT / DISTANCE CARD ─────────────────────
+              if (_currentDistance != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: _isInGeofence
+                            ? Colors.green.shade400
+                            : Colors.orange.shade400,
+                        width: 1.5,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.04),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text(
-                              'DISTANCE TO CHECKPOINT',
-                              style: TextStyle(
-                                fontSize: 10,
-                                letterSpacing: 0.8,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey[600],
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Row(
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  '${_currentDistance!.toStringAsFixed(1)} m',
+                                  'DISTANCE TO CHECKPOINT',
                                   style: TextStyle(
-                                    fontSize: 22,
+                                    fontSize: 10,
+                                    letterSpacing: 0.8,
                                     fontWeight: FontWeight.bold,
-                                    color: _isInGeofence
-                                        ? Colors.green.shade700
-                                        : Colors.black87,
+                                    color: Colors.grey[600],
                                   ),
                                 ),
-                                const SizedBox(width: 6),
+                                const SizedBox(height: 4),
+                                Row(
+                                  children: [
+                                    Text(
+                                      '${_currentDistance!.toStringAsFixed(1)} m',
+                                      style: TextStyle(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.bold,
+                                        color: _isInGeofence
+                                            ? Colors.green.shade700
+                                            : Colors.black87,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '/ ${_geofenceRadiusMeters.toStringAsFixed(0)} m radius',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.grey[600],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 4),
                                 Text(
-                                  '/ ${_geofenceRadiusMeters.toStringAsFixed(0)} m radius',
+                                  _isInGeofence
+                                      ? '✓ ${(_geofenceRadiusMeters - _currentDistance!).toStringAsFixed(1)} m inside radius limit'
+                                      : '⚠ ${(_currentDistance! - _geofenceRadiusMeters).toStringAsFixed(1)} m outside ${_geofenceRadiusMeters.toStringAsFixed(0)}m radius',
                                   style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey[600],
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: _isInGeofence
+                                        ? Colors.green.shade800
+                                        : Colors.red.shade700,
                                   ),
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              _isInGeofence
-                                  ? '✓ ${(_geofenceRadiusMeters - _currentDistance!).toStringAsFixed(1)} m inside radius limit'
-                                  : '⚠ ${(_currentDistance! - _geofenceRadiusMeters).toStringAsFixed(1)} m outside ${_geofenceRadiusMeters.toStringAsFixed(0)}m radius',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                color: _isInGeofence
-                                    ? Colors.green.shade800
-                                    : Colors.red.shade700,
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: _movementTrend.contains('closer')
+                                    ? Colors.green.shade50
+                                    : _movementTrend.contains('away')
+                                    ? Colors.orange.shade50
+                                    : Colors.grey.shade100,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: _movementTrend.contains('closer')
+                                      ? Colors.green.shade400
+                                      : _movementTrend.contains('away')
+                                      ? Colors.orange.shade400
+                                      : Colors.grey.shade300,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    _movementTrend.contains('closer')
+                                        ? Icons.arrow_downward_rounded
+                                        : _movementTrend.contains('away')
+                                        ? Icons.arrow_upward_rounded
+                                        : Icons.place_outlined,
+                                    size: 14,
+                                    color: _movementTrend.contains('closer')
+                                        ? Colors.green.shade700
+                                        : _movementTrend.contains('away')
+                                        ? Colors.orange.shade800
+                                        : Colors.grey.shade700,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    _movementTrend,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: _movementTrend.contains('closer')
+                                          ? Colors.green.shade700
+                                          : _movementTrend.contains('away')
+                                          ? Colors.orange.shade800
+                                          : Colors.grey.shade700,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
                         ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: _movementTrend.contains('closer')
-                                ? Colors.green.shade50
-                                : _movementTrend.contains('away')
-                                ? Colors.orange.shade50
-                                : Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: _movementTrend.contains('closer')
-                                  ? Colors.green.shade400
-                                  : _movementTrend.contains('away')
-                                  ? Colors.orange.shade400
-                                  : Colors.grey.shade300,
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Divider(height: 1, thickness: 1),
+                        ),
+                        // ── WHERE WE ARE (LIVE GPS) ──
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.person_pin_circle_outlined,
+                              size: 15,
+                              color: Colors.blue,
                             ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                _movementTrend.contains('closer')
-                                    ? Icons.arrow_downward_rounded
-                                    : _movementTrend.contains('away')
-                                    ? Icons.arrow_upward_rounded
-                                    : Icons.place_outlined,
-                                size: 14,
-                                color: _movementTrend.contains('closer')
-                                    ? Colors.green.shade700
-                                    : _movementTrend.contains('away')
-                                    ? Colors.orange.shade800
-                                    : Colors.grey.shade700,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                _movementTrend,
-                                style: TextStyle(
+                            const SizedBox(width: 5),
+                            Expanded(
+                              child: Text(
+                                'Your Location: ${_currentLocation != null ? '${_currentLocation!.latitude.toStringAsFixed(6)}, ${_currentLocation!.longitude.toStringAsFixed(6)}' : 'Locating...'}',
+                                style: const TextStyle(
                                   fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                  color: _movementTrend.contains('closer')
-                                      ? Colors.green.shade700
-                                      : _movementTrend.contains('away')
-                                      ? Colors.orange.shade800
-                                      : Colors.grey.shade700,
+                                  color: Colors.black87,
+                                  fontWeight: FontWeight.w500,
                                 ),
                               ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 8),
-                      child: Divider(height: 1, thickness: 1),
-                    ),
-                    // ── WHERE WE ARE (LIVE GPS) ──
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.person_pin_circle_outlined,
-                          size: 15,
-                          color: Colors.blue,
-                        ),
-                        const SizedBox(width: 5),
-                        Expanded(
-                          child: Text(
-                            'Your Location: ${_currentLocation != null ? '${_currentLocation!.latitude.toStringAsFixed(6)}, ${_currentLocation!.longitude.toStringAsFixed(6)}' : 'Locating...'}',
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: Colors.black87,
-                              fontWeight: FontWeight.w500,
                             ),
-                          ),
+                          ],
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    // ── CHECKPOINT TARGET ──
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.flag_outlined,
-                          size: 15,
-                          color: Colors.red,
-                        ),
-                        const SizedBox(width: 5),
-                        Expanded(
-                          child: Text(
-                            'Checkpoint: ${_geofence != null ? '${_targetLatitude.toStringAsFixed(6)}, ${_targetLongitude.toStringAsFixed(6)} (${_geofence!.locationName})' : 'Loading from database...'}',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.grey[700],
+                        const SizedBox(height: 3),
+                        // ── CHECKPOINT TARGET ──
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.flag_outlined,
+                              size: 15,
+                              color: Colors.red,
                             ),
-                          ),
+                            const SizedBox(width: 5),
+                            Expanded(
+                              child: Text(
+                                'Checkpoint: ${_geofence != null ? '${_targetLatitude.toStringAsFixed(6)}, ${_targetLongitude.toStringAsFixed(6)} (${_geofence!.zoneName})' : 'Loading from database...'}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.grey[700],
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                  ],
-                ),
-              ),
-            ),
-
-          // ── SPACER ────────────────────────────────────────────
-          const Spacer(),
-
-          // ── CHECK-IN BUTTON ───────────────────────────────────
-          Padding(
-            padding: EdgeInsets.fromLTRB(40, 0, 40, bottomPad + 32),
-            child: SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: ElevatedButton(
-                onPressed: _buttonEnabled ? _checkIn : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _isInGeofence
-                      ? const Color(0xFF4A855A)
-                      : const Color(0xFF7E9785),
-                  foregroundColor: Colors.black87,
-                  disabledBackgroundColor: Colors.grey[400],
-                  elevation: 0,
-                  side: const BorderSide(color: Color(0xFF0091EA), width: 2.5),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-                child: _isCheckingIn
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : Text(
-                        _isLoadingGeofence
-                            ? 'Loading...'
-                            : _isLoadingLocation
-                            ? 'Getting GPS...'
-                            : 'Check-In',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                        ),
+
+              // ── SECURITY GUARD INFO CARD ──────────────────────────
+              _buildSecurityGuardCard(),
+
+              // ── CHECK-IN BUTTON ───────────────────────────────────
+              Padding(
+                padding: EdgeInsets.fromLTRB(40, 8, 40, bottomPad + 24),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed: _buttonEnabled ? _checkIn : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isInGeofence
+                          ? const Color(0xFF4A855A)
+                          : const Color(0xFF7E9785),
+                      foregroundColor: Colors.black87,
+                      disabledBackgroundColor: Colors.grey[400],
+                      elevation: 0,
+                      side: const BorderSide(color: Color(0xFF0091EA), width: 2.5),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(2),
                       ),
+                    ),
+                    child: _isCheckingIn
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : Text(
+                            _isLoadingGeofence
+                                ? 'Loading...'
+                                : _isLoadingLocation
+                                ? 'Getting GPS...'
+                                : 'Check-In',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                  ),
+                ),
               ),
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
