@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'geofence_service.dart';
+import 'guard_card.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -50,6 +51,10 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
   Position? _currentLocation;
   Geofence? _geofence;
   ActiveSchedule? _activeSchedule;
+  SecurityGuard? _guard;
+
+  /// Logged-in guard: 1 = Malik, 2 = Hafiz, 3 = Amir (GUARD_ID in SECURITY_GUARD)
+  static const int _guardId = 3;
 
   bool _isLoadingGeofence = true;
   bool _isLoadingSchedule = true;
@@ -78,10 +83,9 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
   }
 
   Future<void> _initializeApp() async {
-    await Future.wait([
-      _fetchGeofence(),
-      _fetchSchedule(),
-    ]);
+    // Schedule first: the geofence choice depends on the schedule's GEOFENCE_ID.
+    await _fetchSchedule();
+    await _fetchGeofence();
 
     if (!mounted) return;
     if (_geofence == null) {
@@ -96,6 +100,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
   // ── Fetch geofence ───────────────────────────────────────────
 
+  
   Future<void> _fetchGeofence() async {
     if (!mounted) return;
     setState(() {
@@ -131,7 +136,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
         _geofenceError = 'Database/backend offline: $e';
       });
     }
-  }
+  } //Original
 
   // ── Fetch active schedule & guard info ───────────────────────
 
@@ -142,10 +147,15 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
     });
 
     try {
-      final schedule = await GeofenceService().fetchActiveSchedule(guardId: 1);
+      final service = GeofenceService();
+      final results = await Future.wait([
+        service.fetchActiveSchedule(guardId: _guardId),
+        service.fetchGuard(_guardId), // SECURITY_GUARD row for the card
+      ]);
       if (!mounted) return;
       setState(() {
-        _activeSchedule = schedule;
+        _activeSchedule = results[0] as ActiveSchedule?;
+        _guard = results[1] as SecurityGuard?;
         _isLoadingSchedule = false;
       });
     } catch (_) {
@@ -154,61 +164,6 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
         _isLoadingSchedule = false;
       });
     }
-  }
-
-  // ── Formatted schedule helpers ───────────────────────────────
-
-  String get _formattedStartTime {
-    final raw = _activeSchedule?.scheduleStart;
-    if (raw != null && raw.isNotEmpty) {
-      try {
-        final dt = DateTime.tryParse(raw);
-        if (dt != null) {
-          final h = dt.hour.toString().padLeft(2, '0');
-          final m = dt.minute.toString().padLeft(2, '0');
-          return 'Times=$h:$m';
-        }
-        if (raw.contains(':')) {
-          final parts = raw.split(':');
-          if (parts.length >= 2) {
-            final hPart = parts[0].contains('T') ? parts[0].split('T').last : parts[0];
-            return 'Times=${hPart.padLeft(2, '0')}:${parts[1].padLeft(2, '0')}';
-          }
-        }
-      } catch (_) {}
-    }
-    return 'Times=13:00';
-  }
-
-  String get _formattedDayOfWeek {
-    final dateStr = _activeSchedule?.patrolDate ?? _activeSchedule?.scheduleStart;
-    if (dateStr != null && dateStr.isNotEmpty) {
-      try {
-        final dt = DateTime.tryParse(dateStr);
-        if (dt != null) {
-          const days = [
-            'monday',
-            'tuesday',
-            'wednesday',
-            'thursday',
-            'friday',
-            'saturday',
-            'sunday',
-          ];
-          return days[dt.weekday - 1];
-        }
-      } catch (_) {}
-    }
-    const days = [
-      'monday',
-      'tuesday',
-      'wednesday',
-      'thursday',
-      'friday',
-      'saturday',
-      'sunday',
-    ];
-    return days[DateTime.now().weekday - 1];
   }
 
   // ── Location ─────────────────────────────────────────────────
@@ -344,7 +299,7 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
 
     setState(() => _isCheckingIn = true);
     try {
-      final guardId = _activeSchedule?.guardId ?? 1;
+      final guardId = _guardId;
       final geofenceId = _geofence!.geofenceId;
       final scheduleId = _activeSchedule?.scheduleId;
 
@@ -463,97 +418,10 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
   // ── Security Guard Info Card ─────────────────────────────────
 
   Widget _buildSecurityGuardCard() {
-    final dutyStatus = _activeSchedule?.dutyStatus ?? 'ON_DUTY';
-    final isOnDuty = dutyStatus.toUpperCase() == 'ON_DUTY';
-    final fullName = _isLoadingSchedule
-        ? 'Loading...'
-        : (_activeSchedule?.fullName ?? 'Malik');
-    final guardNumber = _activeSchedule?.guardNumber ?? '4123';
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(20, 0, 20, 14),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: const Color(0xFF0091EA), // 1.5px blue border
-          width: 1.5,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          // Left: Status indicator circle (12x12, #4C8055 when ON_DUTY)
-          Container(
-            width: 12,
-            height: 12,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: isOnDuty ? const Color(0xFF4C8055) : Colors.grey[400],
-            ),
-          ),
-          const SizedBox(width: 12),
-          // Guard Full Name & Guard Number Column
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  fullName,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black87,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  guardNumber,
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: Colors.grey[600],
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          // Right: Times=HH:mm & Day of Week Column
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                _formattedStartTime,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.black87,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                _formattedDayOfWeek,
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.grey[600],
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
+    return GuardCard(
+      guard: _guard,
+      schedule: _activeSchedule,
+      isLoading: _isLoadingSchedule,
     );
   }
 
@@ -609,7 +477,10 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
               // ── LOCATION BAR ──────────────────────────────────────
               Container(
                 color: Colors.grey[400],
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
                 child: Row(
                   children: [
                     Expanded(
@@ -627,7 +498,10 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
                           const SizedBox(height: 2),
                           Text(
                             'Location',
-                            style: TextStyle(fontSize: 11, color: Colors.grey[700]),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[700],
+                            ),
                           ),
                         ],
                       ),
@@ -664,7 +538,11 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
                         onTap: _retry,
                         child: const Padding(
                           padding: EdgeInsets.only(left: 8),
-                          child: Icon(Icons.refresh, size: 16, color: Colors.grey),
+                          child: Icon(
+                            Icons.refresh,
+                            size: 16,
+                            color: Colors.grey,
+                          ),
                         ),
                       ),
                   ],
@@ -674,7 +552,10 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
               // ── LIVE MOVEMENT / DISTANCE CARD ─────────────────────
               if (_currentDistance != null)
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 12,
+                  ),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 14,
@@ -876,7 +757,10 @@ class _GeofenceCheckinScreenState extends State<GeofenceCheckinScreen> {
                       foregroundColor: Colors.black87,
                       disabledBackgroundColor: Colors.grey[400],
                       elevation: 0,
-                      side: const BorderSide(color: Color(0xFF0091EA), width: 2.5),
+                      side: const BorderSide(
+                        color: Color(0xFF0091EA),
+                        width: 2.5,
+                      ),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(2),
                       ),

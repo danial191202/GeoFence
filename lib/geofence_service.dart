@@ -91,19 +91,45 @@ class ActiveSchedule {
   }
 }
 
+class SecurityGuard {
+  final int guardId;
+  final String guardNumber; // GUARD_NUMBER  e.g. 4123
+  final String fullName; // FULL_NAME     e.g. Malik
+  final String shiftTime; // SHIFT_TIME    e.g. 07:00 - 15:00
+  final String dutyStatus; // DUTY_STATUS   ON_DUTY / OFF_DUTY / REST
+
+  const SecurityGuard({
+    required this.guardId,
+    required this.guardNumber,
+    required this.fullName,
+    required this.shiftTime,
+    required this.dutyStatus,
+  });
+
+  factory SecurityGuard.fromJson(Map<String, dynamic> json) {
+    return SecurityGuard(
+      guardId: (json['guardId'] as num?)?.toInt() ?? 0,
+      guardNumber: json['guardNumber']?.toString() ?? '-',
+      fullName: json['fullName']?.toString() ?? '-',
+      shiftTime: json['shiftTime']?.toString() ?? '-',
+      dutyStatus: json['dutyStatus']?.toString() ?? 'OFF_DUTY',
+    );
+  }
+}
+
 class GeofenceService {
   // ── URL Configuration ───────────────────────────────────────────────────────
   // Use the emulator alias (10.0.2.2) when running in Android Emulator.
   // Use physical phone IP when testing on a physical device.
   // Set [_useEmulator] to true for emulator, false for physical phone.
-  static const bool _useEmulator = false;
+  static const bool _useEmulator = false; //to run in phone "false"
 
   // Active Android Emulator Base URL (Windows Host localhost:8082)
   static const String _emulatorBaseUrl = 'http://10.0.2.2:8082';
 
   // Physical phone testing Base URL (your current PC Wi-Fi IP is 10.14.4.115)
   // static const String _deviceBaseUrl = 'http://10.14.3.30:8082';
-  static const String _deviceBaseUrl = 'http://10.14.4.95:8082';
+  static const String _deviceBaseUrl = 'http://10.14.4.47:8082';
 
   /// Active Base API URL
   static String get baseUrl => _useEmulator ? _emulatorBaseUrl : _deviceBaseUrl;
@@ -133,6 +159,23 @@ class GeofenceService {
       throw Exception('API request failed. Status: ${response.statusCode}');
     } catch (error) {
       throw Exception('Unable to retrieve geofences: $error');
+    }
+  }
+
+  /// Fetch guard profile from GET /api/guards/{id}  (SECURITY_GUARD table)
+  Future<SecurityGuard?> fetchGuard(int guardId) async {
+    try {
+      final response = await http
+          .get(Uri.parse('$baseUrl/api/guards/$guardId'))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return SecurityGuard.fromJson(
+          jsonDecode(response.body) as Map<String, dynamic>,
+        );
+      }
+      return null;
+    } catch (_) {
+      return null;
     }
   }
 
